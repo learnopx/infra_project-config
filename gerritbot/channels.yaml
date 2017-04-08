@@ -1,0 +1,10 @@
+openswitch:
+    events:
+      - patchset-created
+      - change-merged
+      - x-vrif-minus-2
+    projects:
+      - infra/project-config
+      - openswitch/governance
+    branches:
+      - master

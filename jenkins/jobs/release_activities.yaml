@@ -1,0 +1,63 @@
+- job:
+    name: 'tagging-branch'
+    node: openswitch
+
+    parameters:
+        - string:
+            name: tag_name
+            default:
+            description: "New tag, e.g. 1.0.0"
+        - string:
+            name: SHA
+            default:
+            description: "SHA value of ops-build where we need a tag, e.g. 099caa049056755366c4b189020edb106a06dde6"
+
+    wrappers:
+        - build-timeout:
+            timeout: 60
+        - timestamps
+        - ansicolor
+        - ssh-agent-credentials:
+             users:
+                - 'ffc18805-a3da-4771-918a-eaaa6a1a0c70'
+
+    builders:
+        - revoke-sudo
+        - shell: |
+            #!/bin/bash
+            /usr/local/jenkins/slave_scripts/tagging_branch.sh $branch_name $tag_name
+
+    publishers:
+        - post-ws-clean
+
+- job:
+    name: 'create-branch'
+    node: openswitch
+
+    parameters:
+        - string:
+            name: branch_name
+            default:
+            description: "New branch name, e.g. rel/dill"
+        - string:
+            name: SHA
+            default:
+            description: "SHA value of ops-build where we need a branch, e.g. 099caa049056755366c4b189020edb106a06dde6"
+
+    wrappers:
+        - build-timeout:
+            timeout: 60
+        - timestamps
+        - ansicolor
+        - ssh-agent-credentials:
+             users:
+                - 'ffc18805-a3da-4771-918a-eaaa6a1a0c70'
+
+    builders:
+        - revoke-sudo
+        - shell: |
+            #!/bin/bash
+            /usr/local/jenkins/slave_scripts/create_branch.sh $branch_name $SHA
+
+    publishers:
+        - post-ws-clean

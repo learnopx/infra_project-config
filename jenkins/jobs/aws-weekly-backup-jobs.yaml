@@ -1,0 +1,13 @@
+- job:
+    name: 'infra-aws-weekly-backup'
+    node: awscli
+
+    wrappers:
+        - build-timeout:
+            timeout: 10
+        - timestamps
+        - ansicolor
+
+    builders:
+        - revoke-sudo
+        - aws-weekly-backup

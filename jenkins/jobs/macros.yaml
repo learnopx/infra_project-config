@@ -1,0 +1,2138 @@
+- builder:
+    name: gerrit-git-prep
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/gerrit-git-prep.sh https://review.openswitch.net git://git.openswitch.net"
+
+- builder:
+    name: branch-git-prep
+    builders:
+      - shell: |
+          #!/bin/bash
+          export BRANCH={branch}
+          /usr/local/jenkins/slave_scripts/gerrit-git-prep.sh https://review.openswitch.net git://git.openswitch.net
+
+- builder:
+    name: tag-git-prep
+    builders:
+      - shell: |
+          #!/bin/bash
+          export ZUUL_URL=git://git.openswitch.net
+          /usr/local/jenkins/slave_scripts/gerrit-git-prep.sh https://review.openswitch.net git://git.openswitch.net
+
+#- builder:
+#    name: aws-maintainance-weekly
+#    builders:
+#      - shell: |
+#          #!/bin/bash
+#          echo "Running weekly maintainance script to release un-used aws resources"
+#          echo "Checking if there are any un-used Elastic IPs that we are paying for"
+#          num_unusedips=`aws ec2 describe-addresses --query 'Addresses[].[AllocationId,AssociationId]' --output text | awk '$2 == "None" { print $1 }' | wc -l`
+#          if [ $num_unusedips -ne 0 ]; then
+#             echo "Following Elastic Ip's are unused and will be released"
+#             unused_ips=`aws ec2 describe-addresses --query 'Addresses[].[AllocationId,AssociationId]' --output text | awk '$2 == "None" { print $1 }'`
+#             echo $unused_ips
+#             aws ec2 describe-addresses --query 'Addresses[].[AllocationId,AssociationId]' --output text | awk '$2 == "None" { print $1 }' | xargs -I {} aws ec2 release-address --allocation-id {}
+#          fi
+#          echo "Check and Release all un-used EBS volumes"
+#          aws ec2 describe-volumes --query 'Volumes[].[VolumeId,State,CreateTime]' --output text | awk '$2 == "available" { print $1,$3 }'  >> volumeinfo.txt
+#          echo "The following EBS volumes are currently not attached to any EC2 instances and are created more than 60 days ago, they will be deleted"
+#          cat volumeinfo.txt
+#          # looping file contents searated by space
+#          _input="volumeinfo.txt"
+#          while IFS=' ' read -r volume timestamp
+#          do
+#            # make sure server timestamp in UTC as AWS will return timestamp in UTC or else export TZ
+#            #echo "volume is $volume and corresponding timestamp is $timestamp"
+#            awsvolumetime=`date --date=$timestamp +"%s"`
+#            # getting differnce when comparated present system time
+#            secondsDiff=$(( `date '+%Y%m%d%H%M%S'` - $awsvolumetime ))
+#            # if differnce is more than 60 days then voulmes will be deleted
+#            if [ $secondsDiff -gt 5184000 ]
+#               then
+#               aws ec2 delete-volume --volume-id $volume
+#               else
+#               echo "Volume canot be delted since less than 60 days UTC"
+#            fi
+#           done < "$_input"
+#           # Erase after parsing to avoid duplication
+#           >volumeinfo.txt
+
+- builder:
+    name: aws-weekly-backup
+    builders:
+      - shell: |
+          #!/bin/bash
+          # Creates Snapshot of both root and all EBS volumes of important openswitch servers on a weekly basis
+          #Maintain the list of servers to be backed in comma separated fashion below
+          hosts_list=puppetmaster.openswitch.net,jenkins.openswitch.net,static.openswitch.net,review.openswitch.net,zuul.openswitch.net,zm01.openswitch.net,eavesdrop.openswitch.net,git.openswitch.net,git03.openswitch.net,git04.openswitch.net,lists.openswitch.net,wiki.openswitch.net
+          hosts=`echo $hosts_list | sed -e 's#,# #g'`
+          for host in $hosts
+          do
+            # Getting elastic ip address
+            elastic_ip=`dig +short $host`
+            # Getting InstanceId based on Elastic ip obtained
+            instance_id=`aws ec2 describe-addresses --public-ips $elastic_ip --query 'Addresses[].[InstanceId]' --output text`
+            # Getting Volume id based on InstanceId
+            volume_id=`aws ec2 describe-volumes --filters Name=attachment.instance-id,Values=$instance_id --query 'Volumes[].[VolumeId]' --output text`
+            for volume in $volume_id
+               do
+               #creating snapshot for each volume and deleting volumes those created 30 days ago
+               /usr/local/jenkins/slave_scripts/ec2-automate-backup.sh -v "$volume" -k 30
+               done
+          done
+
+- builder:
+    name: aws-shutdown-testslaves
+    builders:
+      - shell: |
+          #!/bin/bash
+          # shutdown all slaves that have a ec2 tag called purpose with value debug-slave
+          aws ec2 describe-instances --filter "Name=tag-key,Values=purpose" "Name=tag-value,Values=debug-slave" --query 'Reservations[].Instances[].[InstanceId]' --output text xargs -I {} aws ec2 stop-instances --instance-ids {}
+
+- builder:
+    name: aws-ondemand-slave-demo
+    builders:
+      - shell: |
+          #!/bin/bash
+          echo "Hello World"
+
+- builder:
+    name: revoke-sudo
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          if [ -f /etc/sudoers.d/jenkins-sudo ] ; then
+              sudo rm -f /etc/sudoers.d/jenkins-sudo
+          # Prove that general sudo access is actually revoked
+              ! sudo -n true
+          else
+              exit 0
+          fi
+
+- builder:
+    name: ops-distclean
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          if test -f Makefile ; then make distclean ; fi
+
+- builder:
+    name: yaml-lint
+    builders:
+      - shell: /usr/local/jenkins/slave_scripts/yamllint.py {file}
+
+- builder:
+    name: yaml-verifyall
+    builders:
+      - shell: |
+          #!/bin/bash
+          cp -rf jenkins/scripts/yamllint.py .
+          chmod +x yamllint.py
+          for i in `find . -name *.yaml`; do
+            python yamllint.py $i > test
+            if grep -q FAIL test; then
+               echo " === $i is bad ==="
+               exit 1
+            else
+               cat test
+            fi
+          done
+
+- builder:
+    name: ops-build
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          if [ {platform} == "p4" ]
+          then
+              echo "p4" > .platform_in_archive
+              make configure genericx86-64
+          else
+              make configure {platform}
+              echo {platform} > .platform_in_archive
+          fi
+          BUILD_NUMBER=$(date -u +"%Y%m%d%H")
+          export SSTATE_DIR=/mnt/jenkins/workspace/sstate-cache
+          mkdir -p /mnt/jenkins/workspace/sstate-cache
+          BUILD_VERSION=$(cat yocto/openswitch/meta-distro-openswitch/conf/distro/openswitch.conf | grep 'DISTRO_VERSION =' | cut -d\" -f 2)
+          echo "ops-$BUILD_VERSION-$BRANCH+$BUILD_NUMBER" > .version_string
+          if [ {platform} == "p4" ]
+          then
+              make build/conf/local.conf
+              echo "EXTRA_IMAGE_FEATURES += \"ops-p4\"" >> build/conf/local.conf
+          else
+              echo ""
+          fi
+          make
+
+- builder:
+    name: commit-message-validation
+    builders:
+      - shell: |
+          #!/bin/bash -x
+            set +x
+          git clone -b $ZUUL_BRANCH https://git.openswitch.net/openswitch/{module} module
+          cd $WORKSPACE/module
+          #pwd
+          #ls -altr $WORKSPACE
+          #echo "ZUUL_COMMIT $ZUUL_COMMIT"
+          echo "ZUUL_BRANCH $ZUUL_BRANCH"
+          echo "BASE_LOG_PATH $BASE_LOG_PATH"
+          git remote -v
+          git branch
+          git fetch https://review.openswitch.net/openswitch/{module} refs/changes/$BASE_LOG_PATH && git checkout FETCH_HEAD
+          #git reset --hard $ZUUL_COMMIT
+          echo "**************"
+          commit_msg=`git log --pretty=format:%s%b -n 1`
+          echo "Git commit message is $commit_msg"
+          echo "**************"
+          if [ "$ZUUL_BRANCH" = "rel/dill" ] ; then
+          cd $WORKSPACE
+          echo "Validating git commit message if it contains a valid Taiga ID in the format of TG-XXX, for example, TG-123 and that, it is in list of allowed fixes for rel/dill branch"
+          # Obtain only git commit message from HEAD, can be multi-line with white spaces
+          # To validate if a commit message has Taiga ID in format TG-XXX
+          id_state=`echo $commit_msg | grep -i "TG\s*-\s*[0-9].*" | wc -l`
+          echo "id_sate $id_state"
+          if [ -z "$id_state" ]; then
+            echo "Unable to determine if a valid Taiga ID is provided"
+            echo "If you believe you have provided a Taiga ID in your commit message, this means that the script is not able to parse it"
+            echo "Please make sure there is a space in front of TG-XXX in your commit message"
+            echo "Please amend your commit message and upload for review again"
+            exit 1
+          fi
+          if [ $id_state -ne 0 ]; then
+                echo "Taiga ID exists in commit message"
+                #parse the Taiga IDs in commit message
+                #taiga_ids=`echo $commit_msg | tr -s " " | tr " " "\n" | grep ^TG | sed "s/TG-//g" | tr -cd "[0-9\n]" | tr "\n" "," | sed 's/,$//'`
+                taiga_ids=`echo $commit_msg | sed "s/TG/ TG/Ig;s/TG[ ]*/TG/g" | sed "s/[ ]*TG[ ]*-[ ]*/ TG-/" | tr " " "\n" | grep -i TG | sed "s/.*[Tt][Gg]-\([ 0-9]*\).*/\1/" | tr -d " "`
+                echo "taiga_ids $taiga_ids"
+                git clone https://git.openswitch.net/infra/commit-validation
+                tickets_list=`echo $taiga_ids | sed -e 's#,# #g'`
+                echo "tickets_list $tickets_list"
+                for i in $tickets_list; do
+                    defect_exists=`cat commit-validation/TaigaApprovedDefects.csv | cut -d',' -f1 | grep -w $i | wc -l`
+                    echo "defect_exists $defect_exists"
+                    if [ $defect_exists -ge 1 ]; then
+                        echo "Taiga Defect TG-$i is in list of allowed defects for release branch"
+                        echo "Validation successful"
+                        exit 0
+                        defect_found=1
+                    else
+                        defect_found=0
+                    fi
+                done
+                if [ $defect_found -eq 0 ]; then
+                    echo "Commit Message Validation failed"
+                    echo "The Taiga ID(s) provided in commit message is not in the list of allowed defects for the release branch"
+                    echo "Please contact Barbara Crosser(barbara.crosser@hpe.com) / Ajay Kunnath(ajay.kunnath@hpe.com) / Achyuthan Panduranga(achyuth@hpe.com) to get this defect approved"
+                    exit 1
+                fi
+            else
+                echo "Please provide appropriate Taiga id that is in list of approved fixes for release branch in your commit message"
+                echo "$taiga_ids are not in Approved list of defects"
+                echo "Failing the Build"
+                exit 1
+            fi
+           else
+            echo "Commit Message Validation is Skipped since it is not a release branch"
+           fi
+
+- builder:
+    name: ops-build-tag
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          make configure {platform}
+          echo {platform} > .platform_in_archive
+          BUILD_NUMBER=$(date -u +"%Y%m%d%H")
+          export SSTATE_DIR=/mnt/jenkins/workspace/sstate-cache
+          mkdir -p /mnt/jenkins/workspace/sstate-cache
+          tag_v=$(git describe --abbrev=0 --tags)
+          echo "ops-$tag_v-$BRANCH" > .version_string
+          make
+
+- builder:
+    name: ops-meta-ide
+    builders:
+      - shell: |
+          make bake meta-ide-support
+
+- builder:
+    name: puppet-syntax-check
+    builders:
+      - shell: |
+          export LANG=en_US.utf8
+          find . -iname *.pp | xargs puppet parser validate --modulepath=`pwd`/modules/openstack_project
+          for f in `find . -iname *.erb` ; do
+             erb -x -T '-' $f | ruby -c
+          done
+
+- builder:
+    name: shared-states
+
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          echo "Synchronizing shared states"
+          cd /mnt/jenkins/workspace/sstate-cache
+          rsync --ignore-existing --exclude='*.done' --size-only -avzL -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" --progress ?? `lsb_release -s -i`-`lsb_release -s -r` static.openswitch.net:/srv/static/sstate || true
+
+- builder:
+    name: download-caches
+
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          echo "Synchronizing download archive"
+          cd build/downloads
+          rsync --size-only -avz -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" --progress *.tar.* *.zip --exclude=*.done static.openswitch.net:/srv/static/archive || true
+
+- builder:
+    name: module-build-branch
+
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set +x
+           # Remove the devenv if previously existed, otherwise if the recipe change version we will have conflicts
+           if grep -q {module} .devenv ; then
+             make devenv_rm {module}
+           fi
+
+           # Identify the branch to use for the build system
+           if git ls-remote https://git.openswitch.net/openswitch/ops-build | grep -swq "$ZUUL_BRANCH" ; then
+             OPS_BUILD_BRANCH=$ZUUL_BRANCH
+           else
+             OPS_BUILD_BRANCH=master
+           fi
+           echo "===================  Building ops-build on $OPS_BUILD_BRANCH =================== "
+
+           set -e
+           # If we already have a git repo, avoid nuking them to save build time
+           if [[ ! -e .git ]]; then
+           # I am temp adding this to resolve issue: fatal: A branch named 'feature/intervlan' already exists."
+             rm -fr .[^.]* *
+             git clone -b $OPS_BUILD_BRANCH https://git.openswitch.net/openswitch/ops-build .
+           else
+             # Move to master branch
+             git reset --hard
+             git checkout master
+             git pull
+             if [ "$OPS_BUILD_BRANCH" != "master" ] ; then
+               # If the branch already existed, remove it
+               if git branch | grep -wq $OPS_BUILD_BRANCH  ; then
+                 git branch -D $OPS_BUILD_BRANCH
+               fi
+               git checkout -b $OPS_BUILD_BRANCH --track origin/$OPS_BUILD_BRANCH
+             fi
+           fi
+            # Setup the shared state local cache
+            export SSTATE_DIR=/mnt/jenkins/workspace/sstate-cache
+            mkdir -p /mnt/jenkins/workspace/sstate-cache
+
+            # Check if we need to configure
+            if [ ! -f .platform ] ; then
+                make configure {platform}
+            fi
+
+            # Import and build module
+            mkdir -p src/{module}
+            cd src/{module}
+            /usr/local/jenkins/slave_scripts/gerrit-git-prep.sh https://review.openswitch.net git://git.openswitch.net
+            git diff-tree --no-commit-id --name-only -r refs/heads/master > extension.txt
+            cd ../..
+             # Trigger building of some basic recipe to get the recipe environment working, since devtool is not that good yet...
+            make bake cmake-native
+            make devenv_import {module} $PWD/src/{module}
+            make bake {module}
+
+- builder:
+    name: module-test-ops-ft-only
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set -e
+           rm -rf build/test/*/test-results.xml
+           if [ {platform} == "genericx86-64" ]
+           then
+             cd $WORKSPACE
+             touch .devenv
+             make testenv_init
+             export TOPOLOGY_TEST_IMAGE=$(echo $JOB_NAME-$BUILD_NUMBER  | tr '[A-Z]' '[a-z]')
+             echo "===================  Using Feature Tests from ops:$OPS_BUILD_BRANCH =================== "
+             make testenv_run legacy ops
+
+             test -e .sandbox_uuid && make devenv_ct_clean
+             /usr/local/jenkins/slave_scripts/docker_clean_instances_and_image.sh $TOPOLOGY_TEST_IMAGE
+             sudo chown jenkins.jenkins build/test/*/test-results.xml
+           else
+             echo "Skipping cttest because of one of reasons: 1. Not a genericx86-64 platform; 2. Commit files are all in .md extension"
+           fi
+
+# This builder is for Topology Modular Test Framework
+- builder:
+    name: topology-check
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           # The OPS Publishers look for tests under the build directory
+           # The topology-common's repo tox.ini is configured to generate the files in that directory
+           mkdir -p build
+           # This script clones the repo and applies the patch under test
+           /usr/local/jenkins/slave_scripts/gerrit-git-prep.sh https://review.openswitch.net git://git.openswitch.net
+           tox -r
+           # Capture tox exit code for further processing
+           RC=$?
+           # Change ownership for Jenkins to be able to process the results
+           chown jenkins.jenkins build/topology-test-results.xml
+           exit $RC
+
+- builder:
+    name: generate-coverage-report
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set +x
+           echo "===================  Cloning ops-build =================== "
+           rm -fr .[^.]* *
+           git clone https://git.openswitch.net/openswitch/ops-build .
+           # Setup the shared state local cache
+           export SSTATE_DIR=/mnt/jenkins/workspace/sstate-cache
+           mkdir -p /mnt/jenkins/workspace/sstate-cache
+           # Check if we need to configure
+           if [ ! -f .platform ] ; then
+             make configure genericx86-64
+           fi
+
+           set -e
+           rm -rf build/test/*/test-results.xml
+           # Prepare the test environment
+           touch .devenv
+           touch build/devenv-coverage-enabled
+           export TOPOLOGY_TEST_IMAGE=$(echo $JOB_NAME-$BUILD_NUMBER  | tr '[A-Z]' '[a-z]')
+
+           make testenv_init
+           make {module}-generate_coverage_report
+
+           # Cleanup
+           test -e .sandbox_uuid && make devenv_ct_clean
+           /usr/local/jenkins/slave_scripts/docker_clean_instances_and_image.sh $TOPOLOGY_TEST_IMAGE
+           sudo chown jenkins.jenkins build/test/*/test-results.xml
+
+- builder:
+    name: ops-selfservice-cit-ondemand
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set +x
+           # Identify the branch to use for the build system
+           if git ls-remote https://git.openswitch.net/openswitch/ops-build | grep -swq "$Feature_BranchName" ; then
+              echo "Checking if $Feature_BranchName exists in ops-build repository"
+              OPS_BUILD_BRANCH=$Feature_BranchName
+           else
+              echo "****************************************************************************************"
+              echo "WARNING: cannot find $Feature_BranchName in ops-build"
+              echo "Please provide a Feature Branch name that exists and try again."
+              echo "****************************************************************************************"
+              echo "Here are the list of Feature Branches available"
+              git ls-remote https://git.openswitch.net/openswitch/ops-build | grep -i "Feature"
+              exit 1
+           fi
+           echo "===================  Building ops-build on $OPS_BUILD_BRANCH =================== "
+           rm -fr .[^.]* *
+           git clone -b $OPS_BUILD_BRANCH https://git.openswitch.net/openswitch/ops-build .
+           # Setup the shared state local cache
+           export SSTATE_DIR=/mnt/jenkins/workspace/sstate-cache
+           mkdir -p /mnt/jenkins/workspace/sstate-cache
+           # Check if we need to configure
+           if [ ! -f .platform ] ; then
+             make configure genericx86-64
+           fi
+
+           set -e
+           # clean up .xml
+           rm -rf build/*-test-results.xml
+           # Prepare the test environment
+           touch .devenv
+           make testenv_init
+           export TOPOLOGY_TEST_IMAGE=$(echo $JOB_NAME-$BUILD_NUMBER  | tr '[A-Z]' '[a-z]')
+           # testenv_run will:
+           # build the fs, export into docker, and download the repos and run the tests
+           # The logic below will first runCT in all repos followed by all FT.
+           make testenv_run component $(echo $Repositories_List | sed -e 's#,# #g') TESTENV_ABORT_IF_NOT_FOUND=false
+           make testenv_rerun feature $(echo $Repositories_List | sed -e 's#,# #g') TESTENV_ABORT_IF_NOT_FOUND=false
+           # Cleanup
+           test -e .sandbox_uuid && make devenv_ct_clean
+           /usr/local/jenkins/slave_scripts/docker_clean_instances_and_image.sh $TOPOLOGY_TEST_IMAGE
+           sudo chown jenkins.jenkins build/test/legacy/test-results.xml
+
+- builder:
+    name: copy-autotestJunitResults
+    builders:
+      - conditional-step:
+          condition-kind: and
+          condition-operand:
+          condition-kind: file-exists
+          condition-filename: build/feature-test-results.xml
+          condition-basedir: workspace
+          steps:
+            - shell: |
+                 VERSION_STRING=$(cat .version_string)
+                 mkdir -p genericx86-64_autotestJunitResults
+                 cp build/feature-test-results.xml genericx86-64_autotestJunitResults/
+                 echo ${BUILD_URL}/${BUILD_NUMBER}/testReport/ > genericx86-64_autotestJunitResults/Readme.txt
+                 cp -rf genericx86-64_autotestJunitResults $TYPE/$VERSION_STRING/
+
+- builder:
+    name: check-docker-state
+    builders:
+      - shell: |
+           # Check docker containers and images before starting test
+           #!/bin/bash -x
+           set +e
+           docker version
+           if [ $? != 0 ]
+           then
+             echo "Docker daemon is not running. Try to restart."
+             sudo service docker restart
+             docker version
+             if [ $? != 0 ]
+             then
+               echo "Docker daemon failed to restart. Aborting the build."
+               exit 1
+             else
+               echo "Docker restarted successfully."
+             fi
+           fi
+           docker ps -a
+           docker images
+           # Cleanup docker containers and images before starting test
+           # WARN: This job needs to be modified when multiple gate jobs
+           #       start running on the same slave
+           containers=$(docker ps -aq)
+           if [ -z $containers ]
+           then
+             echo "No containers from previous runs"
+           else
+             docker stop --time=5 $containers
+             docker rm -f $containers
+           fi
+           images=$(docker images -f "dangling=true" -q)
+           if [ -z $images ]
+           then
+             echo "No dangling docker images"
+           else
+             docker rmi -f $images
+           fi
+           images=$(docker images | grep -E '^ops.*|^self-service.*' | awk '{print $1}')
+           if [ -z $images ]
+           then
+             echo "No ops images from previous runs"
+           else
+             docker rmi -f $images
+           fi
+           #Adding additional steps for cleanup
+           #Docker files in aufs fs are not being cleaned up correctly with regular docker commands due to some processes still holding the aufs mounts
+           sudo service docker stop
+           ps -ef | grep dhclient
+           if [ $? -eq 0 ]; then
+            sudo killall -9 dhclient
+           fi
+           if [ `cat /proc/mounts | grep aufs | wc -l` -ne 0 ]; then
+            sudo cat /proc/mounts | grep aufs | awk '{print $2}' | sort -r | xargs sudo umount || true
+           fi
+           sudo rm -rf /var/lib/docker/aufs || true
+           #sudo rm -rf /var/lib/docker/aufs/mnt/* || true
+           #sudo rm -rf /var/lib/docker/aufs/layers/* || true
+           #sudo rm -rf /var/lib/docker/aufs/diff/* || true
+           #sudo find /var/lib/docker/aufs/mnt/ -mindepth 1 -maxdepth 1 -type d | xargs sudo rm -rf
+           #sudo find /var/lib/docker/aufs/layers/ -mindepth 1 -maxdepth 1 -type d | xargs sudo rm -rf
+           #sudo find /var/lib/docker/aufs/diff/ -mindepth 1 -maxdepth 1 -type d | xargs sudo rm -rf
+
+           sudo service docker start
+           echo "After docker cleanup"
+           cat /proc/mounts
+           df -k
+           docker pull openswitch/ubuntutest
+           docker pull ubuntu:14.04
+           docker pull openswitch/omd
+           docker pull host/freeradius-ubuntu
+           docker pull openswitch/centos_ntp
+           docker pull openswitch/tacacs_server:latest
+           docker ps -a
+           docker images
+           echo "After docker cleanup"
+           docker ps -a
+           docker images
+
+- builder:
+    name: check-docker-state-tmp
+    builders:
+      - shell: |
+           # Check docker containers and images before starting test
+           #!/bin/bash -x
+           set +e
+           docker version
+           if [ $? != 0 ]
+           then
+             echo "Docker daemon is not running. Try to restart."
+             sudo service docker restart
+             docker version
+             if [ $? != 0 ]
+             then
+               echo "Docker daemon failed to restart. Aborting the build."
+               exit 1
+             else
+               echo "Docker restarted successfully."
+             fi
+           fi
+           docker ps -a
+           docker images
+           # Cleanup docker containers and images before starting test
+           # WARN: This job needs to be modified when multiple gate jobs
+           #       start running on the same slave
+           containers=$(docker ps -aq)
+           if [ -z $containers ]
+           then
+             echo "No containers from previous runs"
+           else
+             docker stop --time=5 $containers
+             docker rm -f $containers
+           fi
+           images=$(docker images -f "dangling=true" -q)
+           if [ -z $images ]
+           then
+             echo "No dangling docker images"
+           else
+             docker rmi -f $images
+           fi
+           images=$(docker images -aq)
+           if [ -z $images ]
+           then
+             echo "No docker images from previous runs"
+           else
+             docker rmi -f $images
+           fi
+           #Adding additional steps for cleanup
+           #Docker files in aufs fs are not being cleaned up correctly with regular docker commands due to some processes still holding the aufs mounts
+           sudo service docker stop
+           ps -ef | grep dhclient
+           if [ $? -eq 0 ]; then
+            sudo killall -9 dhclient
+           fi
+           if [ `cat /proc/mounts | grep aufs | wc -l` -ne 0 ]; then
+            sudo cat /proc/mounts | grep aufs | awk '{print $2}' | sort -r | xargs sudo umount || true
+           fi
+           sudo rm -rf /var/lib/docker/aufs || true
+           sudo service docker start
+           echo "After docker cleanup"
+           cat /proc/mounts
+           df -k
+           docker pull openswitch/ubuntutest
+           docker pull ubuntu:14.04
+           echo "After docker cleanup"
+           docker ps -a
+           docker images
+
+- builder:
+    name: clear-test-logs
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set +e
+           # Clear test execution logs from previous runs
+           ls /tmp/openswitch-test
+           if [ $? != 0 ]
+           then
+             echo "No previous test logs from ops-vsi."
+           else
+             sudo chown -R jenkins.jenkins /tmp/openswitch-test
+             sudo rm -rf /tmp/openswitch-test/
+           fi
+           ls /tmp/opsTest-results
+           if [ $? != 0 ]
+           then
+             echo "No previous test logs from ops-ft-framework."
+           else
+             sudo chown -R jenkins.jenkins /tmp/opsTest-results
+             sudo rm -rf /tmp/opsTest-results/
+           fi
+           ls /tmp/topology/docker
+           if [ $? != 0 ]
+           then
+             echo "No previous test logs from modular framework."
+           else
+             sudo chown -R jenkins.jenkins /tmp/topology/docker
+             sudo rm -rf /tmp/topology/docker/
+           fi
+           rm -Rf build/*_syslog.txt
+
+- builder:
+    name: module-test-extended
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set -e
+           rm -rf build/test/*/test-results.xml
+           cd src/{module}
+           cat extension.txt
+           if [ {platform} == "genericx86-64" ]
+           then
+             cd $WORKSPACE
+             touch .devenv
+             make {module}-clean
+             touch build/devenv-coverage-enabled
+             make testenv_init
+             export TOPOLOGY_TEST_IMAGE=$(echo $JOB_NAME-$BUILD_NUMBER  | tr '[A-Z]' '[a-z]')
+             # If we have modular component tests, we run them
+             SECOND_RUN_COMMAND=testenv_run
+             if [ -d src/{module}/ops-tests/component ] ; then
+               make testenv_run component {module}
+               SECOND_RUN_COMMAND=testenv_rerun
+             fi
+             # If this module still has legacy component test, we run them too
+             if [ -d src/{module}/tests ] ; then
+               make $SECOND_RUN_COMMAND legacy {module}
+               SECOND_RUN_COMMAND=testenv_rerun
+             fi
+             # If this module has modular feature test, we run them
+             if [ -d src/{module}/ops-tests/feature ] ; then
+               make $SECOND_RUN_COMMAND feature {module}
+               SECOND_RUN_COMMAND=testenv_rerun
+             fi
+
+             # The extended module-test macro will run ops FT tests as well
+             #
+             # Run legacy FTs in ops
+             make $SECOND_RUN_COMMAND legacy ops
+
+             # If ops has modular feature tests, we run them
+             if [ -d src/ops/ops-tests/feature ] ; then
+               make testenv_rerun feature ops
+             fi
+
+             # build the fs, export into docker, and download the repos and run the tests
+             test -e .sandbox_uuid && make devenv_ct_clean
+             /usr/local/jenkins/slave_scripts/docker_clean_instances_and_image.sh $TOPOLOGY_TEST_IMAGE
+             sudo chown jenkins.jenkins build/test/*/test-results.xml
+           else
+             echo "Skipping tests because it is not a genericx86-64 platform"
+           fi
+
+- builder:
+    name: module-test
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set -e
+           rm -rf build/test/*/test-results.xml
+           cd src/{module}
+           cat extension.txt
+           if [ {platform} == "genericx86-64" ]
+           then
+             cd $WORKSPACE
+             touch .devenv
+             make {module}-clean
+             touch build/devenv-coverage-enabled
+             make testenv_init
+             export TOPOLOGY_TEST_IMAGE=$(echo $JOB_NAME-$BUILD_NUMBER  | tr '[A-Z]' '[a-z]')
+             # If we have modular component tests, we run them
+             SECOND_RUN_COMMAND=testenv_run
+             if [ -d src/{module}/ops-tests/component ] ; then
+               make testenv_run component {module}
+               SECOND_RUN_COMMAND=testenv_rerun
+             fi
+             # If this module still has legacy component test, we run them too
+             if [ -d src/{module}/tests ] ; then
+               make $SECOND_RUN_COMMAND legacy {module}
+               SECOND_RUN_COMMAND=testenv_rerun
+             fi
+             # If this module has modular feature test, we run them
+             if [ -d src/{module}/ops-tests/feature ] ; then
+               make $SECOND_RUN_COMMAND feature {module}
+               SECOND_RUN_COMMAND=testenv_rerun
+             fi
+
+             # build the fs, export into docker, and download the repos and run the tests
+             test -e .sandbox_uuid && make devenv_ct_clean
+             /usr/local/jenkins/slave_scripts/docker_clean_instances_and_image.sh $TOPOLOGY_TEST_IMAGE
+             sudo chown jenkins.jenkins build/test/*/test-results.xml
+           else
+             echo "Skipping tests because it is not a genericx86-64 platform"
+           fi
+
+- builder:
+    name: ops-tier2-execute
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          #set -e
+          if [[ ! -e .git ]]; then
+            rm -fr .[^.]* *
+            git clone -b {branch} https://git.openswitch.net/openswitch/ops-build .
+          else
+            git reset --hard
+            git checkout master
+            git pull
+          fi
+
+          if [ ! -f .platform ] ; then
+              make configure genericx86-64
+          fi
+
+          #Manipulate the workspace to copy images from archives instead of building it locally
+          mkdir -p $WORKSPACE/images
+          mkdir -p $WORKSPACE/build/tmp/deploy/images/genericx86-64
+
+          wget http://archive.openswitch.net/{path}/build_v -O build_v
+          export build_v=`cat build_v`
+          wget http://archive.openswitch.net/{path}/openswitch-disk-image-genericx86-64-$build_v.tar.gz -qO $WORKSPACE/images/openswitch-disk-image-genericx86-64.tar.gz
+          wget http://archive.openswitch.net/{path}/openswitch-disk-image-genericx86-64-$build_v.tar.gz -qO $WORKSPACE/build/tmp/deploy/images/genericx86-64/openswitch-disk-image-genericx86-64.tar.gz
+          if ( ! [ -e $WORKSPACE/images/openswitch-disk-image-genericx86-64.tar ] ) && [ -e $WORKSPACE/images/openswitch-disk-image-genericx86-64.tar.gz ] ; then
+              gzip -dk $WORKSPACE/images/openswitch-disk-image-genericx86-64.tar.gz
+          fi
+          if ( ! [ -e $WORKSPACE/build/tmp/deploy/images/genericx86-64/openswitch-disk-image-genericx86-64.tar ] ) && [ -e $WORKSPACE/build/tmp/deploy/images/genericx86-64/openswitch-disk-image-genericx86-64.tar.gz ] ; then
+              gzip -dk $WORKSPACE/build/tmp/deploy/images/genericx86-64/openswitch-disk-image-genericx86-64.tar.gz
+          fi
+          export TOPOLOGY_TEST_IMAGE=$(echo $JOB_NAME-$BUILD_NUMBER  | tr '[A-Z]' '[a-z]')
+          make export_docker_image $TOPOLOGY_TEST_IMAGE
+
+          touch .devenv
+          make testenv_init
+
+          # Get the manifest files from the archives and clone all the repos
+          wget http://archive.openswitch.net/{path}/changelog.manifest -O changelog.manifest
+          sed -i -e 's#https:#http:#g#' changelog.manifest
+          #Hack to remove ops-openvswitch repo from the manifest to avoid fetching this repo
+          sed -i '/ops-openvswitch/d' changelog.manifest
+          rm -rf src/*
+          # Run all tests for tier2 irrespective of failures
+          export TOXENV=py34-tier2
+          while read -r line
+          do
+            set +x
+            repo=`echo $line | cut -d';' -f1`
+            repo_url=`echo $line | cut -d';' -f3`
+            repo_sha=`echo $line | cut -d';' -f2`
+
+            test -e src/$repo/.git || git clone $repo_url src/$repo
+            cd src/$repo ;
+            echo "git reset --hard $repo_sha" ;
+            git reset --hard $repo_sha ;
+            cd $WORKSPACE
+            # Run CT for this repo
+            # We use testenv_rerun commands in order to skip image compilation
+            if [ -d src/$repo/ops-tests/component ] ; then
+              make testenv_rerun component $repo TESTENV_ABORT_IF_NOT_FOUND=false
+              mv build/test/component/test-results.xml build/test/component/test-results-$repo.xml
+            fi
+            # Run Legacy CT for this repo
+            # We use testenv_rerun commands in order to skip image compilation
+            if [ -d src/$repo/tests ] ; then
+              make testenv_rerun legacy $repo TESTENV_ABORT_IF_NOT_FOUND=false
+              mv build/test/legacy/test-results.xml build/test/legacy/test-results-$repo.xml
+            fi
+
+            # Run FT for this repo
+            # We use testenv_rerun commands in order to skip image compilation
+            if [ -d src/$repo/ops-tests/feature ] ; then
+              make testenv_rerun feature $repo TESTENV_ABORT_IF_NOT_FOUND=false
+              mv build/test/feature/test-results.xml build/test/feature/test-results-$repo.xml
+            fi
+
+          done < "changelog.manifest"
+
+          unset TOXENV
+          test -e .sandbox_uuid && make devenv_ct_clean
+          /usr/local/jenkins/slave_scripts/docker_clean_instances_and_image.sh $TOPOLOGY_TEST_IMAGE
+          sudo chown jenkins.jenkins build/test/*/test-results*
+
+
+- builder:
+    name: module-stress-test
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set +e
+           MOD_FRAMEWORK="^ops-tests\/(.*?\/)?test_.*?.py$"
+           PATTERN="^(.*?\/)?tests\/(.*?\/)?test_.*?.py$"
+           TEST_FAILURE=0
+           EXIT_FLAG=0
+           TEST_TYPE=""
+
+           rm -rf build/test/*/test-results.xml
+           cd src/{module}
+           # arr_files=($(git diff-tree --no-commit-id --name-only -r $ZUUL_COMMIT))
+           git diff-tree --no-commit-id --name-only -r $ZUUL_COMMIT > incoming_patch.txt
+           cat incoming_patch.txt
+           if [ {platform} == "genericx86-64" ]
+           then
+             cd $WORKSPACE
+             touch .devenv
+             make testenv_init
+             export TOPOLOGY_TEST_IMAGE=$(echo $JOB_NAME-$BUILD_NUMBER  | tr '[A-Z]' '[a-z]')
+
+             SECOND_RUN_COMMAND=testenv_run
+             # for tst in $(git diff-tree --no-commit-id --name-only -r $ZUUL_COMMIT)
+             while read -r line
+             do
+               echo $line
+               TEST_FAILURE=0
+
+               if [ ! -f src/{module}/$line ]
+               then
+                 echo "skipping deleted file"
+                 continue
+               fi
+
+               if [[ $line =~ $MOD_FRAMEWORK ]];
+               then
+                 TEST_TYPE="component"
+               elif [[ $line =~ $PATTERN ]];
+               then
+                 TEST_TYPE="legacy"
+               else
+                 continue
+               fi
+
+               test_file=$( echo $line | egrep -o 'test_.*?.py$')
+               make $SECOND_RUN_COMMAND $TEST_TYPE {module} TESTENV_ITERATIONS=5 TESTENV_EXTRA_PARAMETERS="-k $test_file"
+               if [ $? != 0 ]
+               then
+                 TEST_FAILURE=1
+               fi
+
+               SECOND_RUN_COMMAND=testenv_rerun
+               if [ $TEST_FAILURE != 0 ]
+               then
+                 EXIT_FLAG=1
+                 make devenv_ct_clean
+                 echo $tst "failed"
+               fi
+             done < src/{module}/incoming_patch.txt
+
+             if [ $EXIT_FLAG == 1 ]
+             then
+               docker rmi -f $VSI_IMAGE_NAME
+               exit 3
+             else
+               set -e
+               # If we have modular component tests, we run them
+               if [ -d src/{module}/ops-tests/component ] ; then
+                 make $SECOND_RUN_COMMAND component {module}
+                 SECOND_RUN_COMMAND=testenv_rerun
+               fi
+               # If this module still has legacy component test, we run them too, otherwise only the legacy feature
+               if [ -d src/{module}/tests ] ; then
+                  TESTS_TO_RUN="{module} ops"
+               else
+                  TESTS_TO_RUN="ops"
+               fi
+               # build the fs, export into docker, and download the repos and run the tests
+               make $SECOND_RUN_COMMAND legacy $TESTS_TO_RUN
+               test -e .sandbox_uuid && make devenv_ct_clean
+               /usr/local/jenkins/slave_scripts/docker_clean_instances_and_image.sh $TOPOLOGY_TEST_IMAGE
+               sudo chown jenkins.jenkins build/test/*/test-results.xml
+             fi
+           else
+             echo "Skipping tests because it is not a genericx86-64 platform"
+           fi
+
+- builder:
+    name: gulp-prepare
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set -e
+
+           if [[ ! -e .git ]]; then
+             # Remove any content, otherwise the clone will fail
+             rm -Rf *
+             git clone https://git.openswitch.net/openswitch/ops-build .
+           else
+             git pull
+           fi
+           if [ ! -f .platform ] ; then
+             make configure {platform}
+             SSTATE_DIR=/mnt/jenkins/workspace/sstate-cache
+             mkdir -p /mnt/jenkins/workspace/sstate-cache
+           fi
+           make bake node-native
+           export PATH=$PWD/build/tmp/sysroots/x86_64-linux/usr/bin:$PATH
+           npm install -g grommet
+           npm install -g gulp
+
+- builder:
+    name: gulp-install
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           set -e
+           make bake node-native
+           export PATH=$PWD/build/tmp/sysroots/x86_64-linux/usr/bin:$PATH
+           npm install -g grommet
+           npm install -g gulp
+
+- builder:
+    name: get-website-stable
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           if [[ ! -d website ]]; then
+             git clone https://git.openswitch.net/infra/website website/
+           else
+             cd website
+             git pull
+           fi
+
+- builder:
+    name: get-website-under-review
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           if ! [ -d website ] ; then mkdir website ; fi
+           cd website
+           /usr/local/jenkins/slave_scripts/gerrit-git-prep.sh https://review.openswitch.net git://git.openswitch.net
+
+- builder:
+    name: get-dev-docs-stable
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           cd website/src/markdown/en-US/documents
+           if [[ ! -d dev ]]; then
+             git clone https://git.openswitch.net/openswitch/ops-docs dev/
+           else
+             cd dev
+             git pull
+           fi
+
+- builder:
+    name: get-dev-docs-underreview
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           cd website/src/markdown/en-US/documents
+           if [[ ! -d dev ]]; then
+             mkdir dev
+           fi
+           cd dev
+           /usr/local/jenkins/slave_scripts/gerrit-git-prep.sh https://review.openswitch.net git://git.openswitch.net
+
+
+- builder:
+    name: get-user-docs-stable
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           cd website/src/markdown/en-US/documents
+           rm -Rf user
+           if [[ ! -d temp ]]; then
+             git clone https://git.openswitch.net/openswitch/ops temp/
+           else
+             git pull
+           fi
+           cd temp
+           cp -R docs ../user
+           cd ..
+           rm -rf temp
+
+- builder:
+    name: get-user-docs-underreview
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           cd website/src/markdown/en-US/documents
+           rm -Rf user
+           if [[ ! -d temp ]]; then
+             mkdir temp
+           fi
+           rm -r temp/*
+           cd temp
+           /usr/local/jenkins/slave_scripts/gerrit-git-prep.sh https://review.openswitch.net git://git.openswitch.net
+           cp -R docs ../user
+
+- builder:
+    name: gulp-dist
+    builders:
+      - shell: |
+           #!/bin/bash -x
+           export PATH=$PWD/build/tmp/sysroots/x86_64-linux/usr/bin:$PATH
+           rm -Rf www
+           cd website
+           npm install
+           gulp dist
+           mv dist ../www
+
+- builder:
+    name: create-periodic-build-image
+
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          VERSION_STRING=$(cat .version_string)
+          PLATFORM=$(cat .platform_in_archive)
+          echo "BUILD_ID=\"$PLATFORM-$VERSION_STRING\"" > build/build_info.conf
+          make changelog_manifest
+          make
+
+- builder:
+    name: create-build-artifacts
+
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          VERSION_STRING=$(cat .version_string)
+          PLATFORM=$(cat .platform_in_archive)
+          rm -Rf $TYPE
+          mkdir -p $TYPE/$VERSION_STRING/$PLATFORM
+          count=`ls -l images/openswitch-disk-image-*.tar 2>/dev/null | wc -l`
+          if [ $count != 0 ]; then
+            gzip -f images/openswitch-disk-image-*.tar
+          fi
+          find images -name "onie-installer*" -exec bash -c "cp \"\$0\" $TYPE/$VERSION_STRING/$PLATFORM/\$(basename \"\$0\")-$VERSION_STRING" {} \;
+          find images -name "*.ova" -exec bash -c "cp \"\$0\" $TYPE/$VERSION_STRING/$PLATFORM/\$(basename -s .ova \"\$0\")-$VERSION_STRING.ova" {} \;
+          find images -name "*.tar.gz" -exec bash -c "cp \"\$0\" $TYPE/$VERSION_STRING/$PLATFORM/\$(basename -s .tar.gz \"\$0\")-$VERSION_STRING.tar.gz" {} \;
+          find images -name "*.manifest" -exec bash -c "cp \"\$0\" $TYPE/$VERSION_STRING/$PLATFORM/\$(basename -s .manifest \"\$0\")-$VERSION_STRING.manifest" {} \;
+          cp build/changelog.manifest $TYPE/$VERSION_STRING/$PLATFORM/changelog.manifest
+          git rev-parse HEAD >> git-sha.txt
+          cp git-sha.txt $TYPE/$VERSION_STRING/$PLATFORM/git-sha.txt
+          test -e .version_string && echo $VERSION_STRING > $TYPE/$VERSION_STRING/$PLATFORM/build_v
+          cd $TYPE/$VERSION_STRING/$PLATFORM
+          for file in $(ls) ; do sha256sum $file > $file.sha256sum ; done
+          rename 's/onie-installer/openswitch-onie-installer/' *
+
+- builder:
+    name: capture-test-logs
+    builders:
+      - shell: |
+          # Copy ops-vsi test results
+          rm -rf openswitch-test
+          cp -rf /tmp/openswitch-test/. openswitch-test || true
+          # Copy ops-ft-framework test results
+          rm -rf opsTest-results
+          cp -rf /tmp/opsTest-results/. opsTest-results || true
+
+- builder:
+    name: scp-artifacts
+    builders:
+      - shell: |
+          VERSION_STRING=$(cat .version_string)
+          PLATFORM=$(cat .platform_in_archive)
+
+          if [ "$PLATFORM" = "p4" ]
+          then
+            cd $TYPE; scp -r $VERSION_STRING static.openswitch.net:/srv/static/archive/experimental/$TYPE/.
+          else
+            cd $TYPE; scp -r $VERSION_STRING static.openswitch.net:/srv/static/archive/artifacts/$TYPE/.
+          fi
+
+- builder:
+    name: scp-artifacts-junit
+    builders:
+      - conditional-step:
+          condition-kind: file-exists
+          condition-filename: build/feature-test-results.xml
+          on-evaluation-failure: dont-run
+          steps:
+             - shell: |
+                 VERSION_STRING=$(cat .version_string)
+                 mkdir -p genericx86-64_autotestJunitResults
+                 cp build/feature-test-results.xml genericx86-64_autotestJunitResults/
+                 echo ${BUILD_URL}/${BUILD_NUMBER}/testReport/ > genericx86-64_autotestJunitResults/Readme.txt
+                 scp -r genericx86-64_autotestJunitResults static.openswitch.net:/srv/static/archive/artifacts/$TYPE/$VERSION_STRING/.
+
+- builder:
+    name: coverage
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-cover.sh"
+
+- builder:
+    name: docs
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-docs.sh"
+
+- builder:
+    name: maven-test
+    builders:
+      - shell: "mvn test -B"
+
+- builder:
+    name: maven-package
+    builders:
+      - shell: "mvn package -B"
+
+- builder:
+    name: gerrit-package
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/package-gerrit.sh"
+
+- builder:
+    name: gerrit-preclean
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          rm -fr ~/.m2
+          rm -fr ~/.java
+          ./tools/version.sh --release
+
+- builder:
+    name: gerrit-postrun
+    builders:
+      - shell: "./tools/version.sh --reset"
+
+- builder:
+    name: bashate
+    builders:
+      - tox:
+          envlist: bashate
+
+- builder:
+    name: pep8
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-pep8.sh"
+
+- builder:
+    name: pylint
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-pylint.sh"
+
+- builder:
+    name: npm-install
+    builders:
+      - shell: |
+          sudo apt-get update
+          sudo apt-get install -y nodejs nodejs-legacy npm
+
+- builder:
+    name: npm-run
+    builders:
+      - shell: |
+          export DISPLAY=:99
+          npm install
+          npm run {command}
+
+- builder:
+    name: xvfb-start
+    builders:
+      - shell: |
+          DIMENSIONS='1280x1024x24'
+          /usr/bin/Xvfb :99 -screen 0 ${DIMENSIONS} -ac +extension GLX +render -noreset 2>&1 > /dev/null &
+
+- builder:
+    name: xvfb-install
+    builders:
+      - shell: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+- builder:
+    name: firefox-install
+    builders:
+      - shell: |
+          sudo apt-get update
+          sudo apt-get install -y firefox
+
+- builder:
+    name: chrome-install
+    builders:
+      - shell: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
+
+- builder:
+    name: diskimage-builder-install
+    builders:
+      - shell: |
+          sudo apt-get update
+          sudo apt-get install -y qemu kpartx
+          sudo pip install dib-utils
+          sudo pip install diskimage-builder
+
+- builder:
+    name: uninstall-puppet
+    builders:
+      - shell: "sudo apt-get remove -y --purge facter puppet puppet-common"
+
+- builder:
+    name: puppet-lint
+    builders:
+      - shell: |
+          if [ -f Modulefile -o -f metadata.json ]; then
+            if [ -f Modulefile ]; then
+              MODULE=$(awk '/^name/ {print $NF}' Modulefile |tr -d \"\')
+            elif [ -f metadata.json ]; then
+              MODULE=$(python -c 'import json;print json.load(open("metadata.json"))["name"]')
+            fi
+            if [ -z "$MODULE" ]; then
+              echo "Module name not defined in Modulefile or metadata.json"
+            else
+              mkdir -p "$MODULE"
+              rsync -a --exclude="$MODULE" --exclude ".*" . "$MODULE"
+              cd "$MODULE"
+            fi
+          fi
+          if [ -f Gemfile ]; then
+            mkdir .bundled_gems
+            export GEM_HOME=`pwd`/.bundled_gems
+            bundle install
+            bundle exec rake lint 2>&1
+          else
+            rake lint 2>&1
+          fi
+
+- builder:
+    name: puppet-syntax
+    builders:
+      - shell: |
+          find . -iname *.pp | xargs puppet parser validate --modulepath=`pwd`/modules
+          for f in `find . -iname *.erb` ; do
+            erb -x -T '-' $f | ruby -c
+          done
+
+# note that this job uses an in-repo script for execution
+# in order to cater for differing requirements per branch
+- builder:
+    name: ansible-check-lint
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          sudo scripts/gate-check-lint.sh
+
+# note that this job uses an in-repo script for execution
+# in order to cater for differing requirements per branch
+- builder:
+    name: ansible-check-commit
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          sudo scripts/gate-check-commit.sh
+
+- builder:
+    name: ansible-prep
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          sudo -H pip install -U ansible
+
+- builder:
+    name: ansible-syntax
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          cd tests
+          ansible-playbook --syntax-check -i inventory test.yml -e rolename=$(basename $(dirname $(pwd)))
+
+- builder:
+    name: ansible-lint-prep
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          sudo -H pip install ansible-lint
+
+- builder:
+    name: ansible-lint
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          ansible-lint **/*.yml
+
+- builder:
+    name: ruby-191-prep
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          # Set 1.9.1 ruby and gem as default
+          sudo update-alternatives --install /usr/bin/ruby ruby /usr/bin/ruby1.9.1 20
+          sudo update-alternatives --set ruby /usr/bin/ruby1.9.1
+          sudo update-alternatives --install /usr/bin/gem gem /usr/bin/gem1.9.1 10
+          sudo update-alternatives --set gem /usr/bin/gem1.9.1
+          sudo gem install bundler --no-rdoc --no-ri --verbose
+          sudo gem install rake    --no-rdoc --no-ri --verbose
+
+- builder:
+    name: chef-bundler-prep
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          mkdir -p .bundle
+          grep -E .*berkshelf.*3\.\d*\.\d*.* Gemfile
+          if [ $? -eq 0 ]; then
+            # For Berkshelf 3.x use the system gecode 3.x libraries
+            sudo apt-get update
+            sudo apt-get install -y libgecode-dev libxml2-dev libxml2 libxslt-dev build-essential
+            USE_SYSTEM_GECODE=1 bundle install --path=.bundle --jobs 1 --retry 3 --verbose
+          else
+            bundle install --path=.bundle --jobs 1 --retry 3 --verbose
+          fi
+
+- builder:
+    name: chef-bootstrap
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          ./bootstrap.sh
+
+- builder:
+    name: chef-rake-test
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          chef exec rake
+
+- builder:
+    name: chef-berkshelf-prep
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          grep -E .*berkshelf.*3\.\d*\.\d*.* Gemfile
+          if [ $? -eq 0 ]; then
+            bundle exec berks vendor .cookbooks
+          else
+            mkdir -p .cookbooks
+            bundle exec berks install --path=.cookbooks
+          fi
+
+- builder:
+    name: chef-cookbook-rubocop
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          if grep rubocop: Strainerfile; then
+              bundle exec strainer test --cookbooks-path=.cookbooks --only=rubocop
+          else
+              bundle exec rubocop
+          fi
+
+- builder:
+    name: chef-cookbook-foodcritic
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          if grep foodcritic: Strainerfile; then
+              bundle exec strainer test --cookbooks-path=.cookbooks --only=foodcritic
+          else
+              bundle exec foodcritic -f any -t ~FC003 -t ~FC023 .
+          fi
+
+- builder:
+    name: chef-cookbook-chefspec
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          if grep chefspec: Strainerfile; then
+              bundle exec strainer test --cookbooks-path=.cookbooks --only=chefspec
+          else
+              bundle exec rspec --format documentation
+          fi
+
+- builder:
+    name: run-tests
+    builders:
+      - shell: "./run-tests.sh"
+
+- builder:
+    name: selenium
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-selenium.sh"
+
+- builder:
+    name: js-build
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-jsbuild.sh {command}"
+
+- builder:
+    name: python26
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-tox.sh py26"
+
+- builder:
+    name: python27
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-tox.sh py27"
+
+- builder:
+    name: python33
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-tox.sh py33"
+
+- builder:
+    name: python34
+    builders:
+      - shell:  "/usr/local/jenkins/slave_scripts/run-tox.sh py34"
+
+- builder:
+    name: pypy
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-tox.sh pypy"
+
+- builder:
+    name: tox
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/run-tox.sh {envlist}"
+
+- builder:
+    name: assert-no-extra-files
+    builders:
+      - shell: |
+          #!/bin/bash
+          OUT=`git ls-files --other --exclude-standard --directory`
+          if [ -z "$OUT" ]; then
+              echo "No extra files created during test."
+              exit 0
+          else
+              echo "The following un-ignored files were created during the test:"
+              echo "$OUT"
+              exit 0  # TODO: change to 1 to fail tests.
+          fi
+
+- builder:
+    name: tarball
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          /usr/local/jenkins/slave_scripts/run-tarball.sh
+          /usr/local/jenkins/slave_scripts/run-wheel.sh
+
+- builder:
+    name: devstack-checkout
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          if [[ ! -e devstack-gate ]]; then
+              git clone git://git.openstack.org/openstack-infra/devstack-gate
+          else
+              cd devstack-gate
+              git remote set-url origin git://git.openstack.org/openstack-infra/devstack-gate
+              git remote update
+              git reset --hard
+              if ! git clean -x -f ; then
+                  sleep 1
+                  git clean -x -f
+              fi
+              git checkout master
+              git reset --hard remotes/origin/master
+              if ! git clean -x -f ; then
+                  sleep 1
+                  git clean -x -f
+              fi
+              cd ..
+          fi
+
+- builder:
+    name: experimental-devstack-checkout
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          if [[ ! -e devstack-gate ]]; then
+              git clone git://git.openstack.org/openstack-infra/devstack-gate
+          fi
+          cd devstack-gate
+          /usr/local/jenkins/slave_scripts/gerrit-git-prep.sh https://review.openstack.org git://git.openstack.org
+          cd ..
+
+- builder:
+    name: link-logs
+    builders:
+      - shell: |
+          #!/bin/sh
+          echo "Detailed logs: http://logs.openstack.org/$LOG_PATH/"
+
+
+- builder:
+    name: net-info
+    builders:
+      - shell: |
+          #!/bin/sh
+          export PATH=$PATH:/sbin
+          echo "Network interface addresses..."
+          ip address show
+          echo "Network routing tables..."
+          ip route show
+          ip -6 route show
+          echo "Network neighbors..."
+          ip neighbor show
+
+- builder:
+    name: base-packages-trusty
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          sudo apt-get update
+          sudo PATH=/usr/sbin:/sbin:$PATH DEBIAN_FRONTEND=noninteractive \
+              apt-get --option "Dpkg::Options::=--force-confold" --assume-yes \
+              install \
+                  build-essential \
+                  python-dev \
+                  mysql-client \
+                  mysql-server \
+                  libmysqlclient-dev \
+                  postgresql-client \
+                  postgresql \
+                  libpq-dev \
+                  libffi-dev \
+                  libxslt-dev \
+
+- builder:
+    name: mysql-prep
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          DB_ROOT_PW=insecure_slave
+          DB_USER=openstack_citest
+          DB_PW=openstack_citest
+          sudo -H mysqladmin -u root password $DB_ROOT_PW
+          sudo -H mysql -u root -p$DB_ROOT_PW -h 127.0.0.1 -e "
+              GRANT ALL PRIVILEGES ON *.*
+                  TO '$DB_USER'@'%' identified by '$DB_PW';"
+
+- builder:
+    name: pgsql-prep
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          DB_ROOT_PW=insecure_slave
+          DB_USER=openstack_citest
+          DB_PW=openstack_citest
+          root_roles=$(sudo -H -u postgres psql -t -c "
+              SELECT 'HERE' from pg_roles where rolname='$DB_USER'")
+          if [[ ${root_roles} == *HERE ]];then
+              sudo -H -u postgres psql -c "
+                  ALTER ROLE $DB_USER WITH SUPERUSER LOGIN PASSWORD '$DB_PW'"
+          else
+              sudo -H -u postgres psql -c "
+                  CREATE ROLE $DB_USER WITH SUPERUSER LOGIN PASSWORD '$DB_PW'"
+          fi
+          cat << EOF > $HOME/.pgpass
+          *:*:*:$DB_USER:$DB_PW
+          EOF
+          chmod 0600 $HOME/.pgpass
+
+- builder:
+    name: mysql-db
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          DB_USER=openstack_citest
+          DB_PW=openstack_citest
+          mysql -u $DB_USER -p$DB_PW -h 127.0.0.1 -e "
+              SET default_storage_engine=MYISAM;
+              DROP DATABASE IF EXISTS {db_name};
+              CREATE DATABASE {db_name} CHARACTER SET utf8;"
+
+- builder:
+    name: pgsql-db
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          DB_USER=openstack_citest
+          DB_PW=openstack_citest
+          psql -h 127.0.0.1 -U $DB_USER -d template1 -c "
+              DROP DATABASE IF EXISTS {db_name}"
+          createdb -h 127.0.0.1 -U $DB_USER -l C -T template0 -E utf8 {db_name}
+
+- builder:
+    name: static-publish-prep
+
+    # We want to publish to the docroot but the scp publisher cannot remove
+    # paths, so use a shell builder to move the content in the right place and
+    # publish from there.
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          rm -rf ,content
+          mv {source} ,content
+          rm -rf .[^.]* [^,]*
+          # Disable errexit here because there might not be any dotfiles.
+          set +e
+          mv ,content/.[^.]* ./
+          set -e
+          mv ,content/* ./
+          rm -r ,content
+
+- builder:
+    name: install-buck
+    builders:
+      - shell: |
+          #!/bin/bash -xe
+          if [[ ! -d "buck" ]]
+          then
+            git clone https://gerrit.googlesource.com/buck
+            cd buck
+            ant
+          fi
+
+
+- builder:
+    name: zuul-swift-upload
+    builders:
+      - shell: "/usr/zuul-swift-logs-env/bin/python /usr/local/jenkins/slave_scripts/zuul_swift_upload.py --name {zuul_log_instruction_set} {upload_source}"
+
+
+- builder:
+    name: zuul-swift-upload-logs
+    builders:
+      - zuul-swift-upload:
+         zuul_log_instruction_set: logs
+         upload_source: '{upload_source}'
+
+
+- builder:
+    name: zuul-swift-upload-console-log
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/grab_console_log.sh"
+      - zuul-swift-upload-logs:
+         upload_source: '/tmp/console.html'
+
+
+- builder:
+    name: zuul-swift-upload-logs-with-console
+    builders:
+      - shell: "/usr/local/jenkins/slave_scripts/grab_console_log.sh"
+      - zuul-swift-upload-logs:
+         upload_source: '{upload_source} /tmp/console.html'
+
+
+- builder:
+    name: print-node-uuid
+    builders:
+      - shell: |
+          #!/bin/sh
+          [ -f /etc/nodepool/uuid ] && echo "Node UUID: $(cat /etc/nodepool/uuid)"
+
+- builder:
+    name: build-openvswitch-docs
+    builders:
+      - shell: |
+          #!/bin/sh
+          cd src/{module}/build/
+          make dist-docs
+
+- builder:
+    name: swagger-api
+    builders:
+      - shell: |
+          #!/bin/bash -x
+          set -e
+          rm -rf $WORKSPACE/src/ops-openvswitch
+          git clone -b patches/branch-2.5 https://git.openswitch.net/openswitch/ovs $WORKSPACE/src/ops-openvswitch
+          cp /usr/local/jenkins/slave_scripts/inflect.py $WORKSPACE/src/ops-restd/opslib/
+          cd $WORKSPACE/src/ops-restd/opslib
+          mkdir -p $WORKSPACE/scp
+          PYTHONPATH=../../ops-openvswitch/python python apidocgen.py $WORKSPACE/build/tmp/sysroots/genericx86-64/usr/share/openvswitch/openswitch.opsschema > $WORKSPACE/scp/{files}
+          if [[ $? -ne 0 ]]; then
+             exit 1
+          else
+             set +x
+             echo "========== api doc generator ran succesfully, {files} is genereted =========="
+          fi
+
+# =====================================================================
+
+- wrapper:
+    name: build-timeout
+    wrappers:
+      - timeout:
+          timeout: '{timeout}'
+          timeout-var: 'BUILD_TIMEOUT'
+          fail: true
+
+# ======================================================================
+
+- publisher:
+    name: tarball
+    publishers:
+      - archive:
+          artifacts: 'dist/*.tar.gz'
+      - scp:
+          site: '{site}'
+          files:
+            - target: 'tarballs/{project}/'
+              source: 'dist/*.tar.gz'
+
+- publisher:
+    name: wheel
+    publishers:
+      - archive:
+          artifacts: 'dist/*.whl'
+      - scp:
+          site: '{site}'
+          files:
+            - target: 'tarballs/{project}/'
+              source: 'dist/*.whl'
+
+- publisher:
+    name: war
+    publishers:
+      - archive:
+          artifacts: '{warfile}'
+      - scp:
+          site: '{site}'
+          files:
+            - target: '{target}'
+              source: '{warfile}'
+
+- publisher:
+    name: console-log
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: 'logs/$LOG_PATH'
+              copy-console: true
+              copy-after-failure: true
+
+
+- publisher:
+    name: devstack-logs
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: 'logs/$LOG_PATH'
+              source: 'logs/**'
+              keep-hierarchy: true
+              copy-after-failure: true
+
+
+- publisher:
+    name: coverage-log
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: 'logs/$LOG_PATH'
+              source: 'cover/**'
+              keep-hierarchy: true
+              copy-after-failure: true
+
+- publisher:
+    name: coverage-log-ruby
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: 'logs/$LOG_PATH'
+              source: 'coverage/**'
+              keep-hierarchy: true
+              copy-after-failure: true
+
+- publisher:
+    name: test-results
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: 'logs/$LOG_PATH'
+              source: '**/*nose_results.html'
+              keep-hierarchy: false
+              copy-after-failure: true
+            - target: 'logs/$LOG_PATH'
+              source: '**/*testr_results.html.gz'
+              keep-hierarchy: false
+              copy-after-failure: true
+            - target: 'logs/$LOG_PATH'
+              source: '.testrepository/tmp*'
+              keep-hierarchy: false
+              copy-after-failure: true
+            - target: 'logs/$LOG_PATH'
+              source: '**/*subunit_log.txt.gz'
+              keep-hierarchy: false
+              copy-after-failure: true
+            - target: 'logs/$LOG_PATH/tox'
+              source: '.tox/*/log/*'
+              keep-hierarchy: false
+              copy-after-failure: true
+
+- publisher:
+    name: upload-sphinx-draft
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: 'docs-draft/$LOG_PATH'
+              source: 'doc/build/html/**'
+              keep-hierarchy: true
+              copy-after-failure: true
+
+- publisher:
+    name: upload-docs-draft
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: 'docs-draft/$LOG_PATH/'
+              source: 'publish-docs/**'
+              keep-hierarchy: true
+              copy-after-failure: true
+
+
+- publisher:
+    name: upload-to-docs-site
+    publishers:
+      - ftp:
+          site: docs.openstack.org
+          source: 'publish-docs/**'
+          target: '/'
+          remove-prefix: 'publish-docs/'
+
+- publisher:
+    name: upload-doc-build-results
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: 'logs/$LOG_PATH'
+              source: 'build-*.log.gz'
+              keep-hierarchy: false
+              copy-after-failure: true
+
+- publisher:
+    name: zuul-swift-upload
+    publishers:
+      - postbuildscript:
+          builders:
+            - zuul-swift-upload:
+                zuul_log_instruction_set: '{zuul_log_instruction_set}'
+                upload_source: '{upload_source}'
+          # These flags really mean only if on * when
+          # checked. When both set to false the post script
+          # should run on every job regardless of status.
+          onfailure: False
+          onsuccess: False
+
+- publisher:
+    name: zuul-swift-upload-logs
+    publishers:
+      - postbuildscript:
+          builders:
+            - zuul-swift-upload-logs:
+                upload_source: '{upload_source}'
+          # These flags really mean only if on * when
+          # checked. When both set to false the post script
+          # should run on every job regardless of status.
+          onfailure: False
+          onsuccess: False
+
+- publisher:
+    name: zuul-swift-upload-console-log
+    publishers:
+      - postbuildscript:
+          builders:
+            - zuul-swift-upload-console-log
+          # These flags really mean only if on * when
+          # checked. When both set to false the post script
+          # should run on every job regardless of status.
+          onfailure: False
+          onsuccess: False
+
+- publisher:
+    name: zuul-swift-upload-logs-with-console
+    publishers:
+      - postbuildscript:
+          builders:
+            - zuul-swift-upload-logs-with-console:
+                upload_source: '{upload_source}'
+          # These flags really mean only if on * when
+          # checked. When both set to false the post script
+          # should run on every job regardless of status.
+          onfailure: False
+          onsuccess: False
+
+- publisher:
+    name: zuul-swift-devstack-logs-with-console
+    publishers:
+      - postbuildscript:
+          builders:
+            - shell: |
+                #!/bin/bash -x
+                cp devstack-gate/help/tempest-logs.html logs/index_footer.html
+                mkdir zuul_swift_devstack_logs_extra
+                cp devstack-gate/help/tempest-overview.html zuul_swift_devstack_logs_extra/index_footer.html
+      - zuul-swift-upload-logs-with-console:
+          upload_source: 'logs zuul_swift_devstack_logs_extra/index_footer.html'
+
+- publisher:
+    name: zuul-swift-test-results-with-console
+    publishers:
+      - zuul-swift-upload-logs-with-console:
+          upload_source: '"**/*nose_results.html" "**/*testr_results.html.gz" ".testrepository/tmp*" "**/*subunit_log.txt.gz" ".tox/*/log/*"'
+
+- publisher:
+    name: simple-scp
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: '{dest}'
+              source: 'scp/*.json'
+              keep-hierarchy: true
+              copy-after-failure: false
+
+- publisher:
+    name: governance-scp
+    publishers:
+      - scp:
+          site: 'static.openswitch.net'
+          files:
+            - target: '{docroot}/'
+              source: '**'
+              keep-hierarchy: true
+              copy-after-failure: false
+
+- publisher:
+    name: archive-syslog
+    publishers:
+      - postbuildscript:
+          builders:
+            - shell: |
+                 export TOPOLOGY_TEST_IMAGE=$(echo $JOB_NAME-$BUILD_NUMBER  | tr '[A-Z]' '[a-z]')
+                 export SYSLOG="${TOPOLOGY_TEST_IMAGE}_syslog.txt"
+                 sudo tail -n 2000 /var/log/syslog > build/$SYSLOG
+          script-only-if-succeeded: False
+          script-only-if-failed: False
+      - conditional-publisher:
+          - condition-kind: current-status
+            condition-worst: FAILURE
+            condition-best: UNSTABLE
+            action:
+                - archive:
+                    artifacts: 'build/*_syslog.txt'
+                    allow-empty: 'true'
+
+- publisher:
+    name: post-ws-clean
+    publishers:
+      - workspace-cleanup:
+         dirmatch: true
+         include:
+            - "*.*"
+            - "*"
+         clean-if:
+            - success: true
+            - unstable: true
+            - not-built: true
+            - aborted: true
+            - failure: true
+         fail-build: false
+
+- publisher:
+    name: archive-test-logs
+    publishers:
+      - conditional-publisher:
+          - condition-kind: shell
+            condition-command: test -d opsTest-results
+            on-evaluation-failure: dont-run
+            action:
+                - archive:
+                    artifacts: 'opsTest-results/**/*.log'
+                    allow-empty: 'true'
+      - conditional-publisher:
+          - condition-kind: shell
+            condition-command: test -d openswitch-test
+            on-evaluation-failure: dont-run
+            action:
+                - archive:
+                    artifacts: 'openswitch-test/**'
+                    allow-empty: 'true'
+
+- publisher:
+    name: archive-test-logs-on-failure
+    publishers:
+      - postbuildscript:
+          builders:
+            - shell: |
+                # Copy ops-vsi test results
+                rm -rf openswitch-test
+                cp -rf /tmp/openswitch-test/. openswitch-test || true
+                # Copy ops-ft-framework test results
+                rm -rf opsTest-results
+                cp -rf /tmp/opsTest-results/. opsTest-results || true
+                # Copy modular framework test results
+                rm -rf modFramework-results
+                cp -rf /tmp/topology/docker/. modFramework-results || true
+          script-only-if-succeeded: False
+          script-only-if-failed: False
+      - conditional-publisher:
+          - condition-kind: current-status
+            condition-worst: FAILURE
+            condition-best: UNSTABLE
+            action:
+                - archive:
+                    artifacts: 'opsTest-results/**'
+                    allow-empty: 'true'
+                - archive:
+                    artifacts: 'openswitch-test/**'
+                    allow-empty: 'true'
+                - archive:
+                    artifacts: 'modFramework-results/**'
+                    allow-empty: 'true'
+
+- publisher:
+    name: conditional-gather-test-results
+    publishers:
+      - conditional-publisher:
+          - condition-kind: shell
+            condition-command: ls build/test/*/test-results*.xml > /dev/null
+            on-evaluation-failure: dont-run
+            action:
+                - junit:
+                    results: 'build/test/**/test-results*.xml'
+
+- publisher:
+    name: conditional-junit
+    publishers:
+      - conditional-publisher:
+          - condition-kind: shell
+            condition-command: ls build/*test-results.xml
+            on-evaluation-failure: dont-run
+            action:
+                - junit:
+                    results: 'build/*test*.xml'
+- publisher:
+    name: conditional-htmlreports
+    publishers:
+      - conditional-publisher:
+          - condition-kind: shell
+            condition-command: ls coverage/html/index.html
+            on-evaluation-failure: dont-run
+            action:
+                - html-publisher:
+                    name: "Code Coverage Report"
+                    dir: "coverage/html"
+                    files: "index.html"
+                    keep-all: true
+                    allow-missing: true
+                    link-to-last-build: true
+- publisher:
+    name: conditional-image-junit-to-archive
+    publishers:
+      - conditional-publisher:
+          - condition-kind: shell
+            condition-command: ls build/feature-test-results.xml
+            on-evaluation-failure: dont-run
+            action:
+                - postbuildscript:
+                    builders:
+                        - shell: |
+                            VERSION_STRING=$(cat .version_string)
+                            rm -rf genericx86-64_autotestJunitResults/*; mkdir -p genericx86-64_autotestJunitResults
+                            cp build/feature-test-results.xml genericx86-64_autotestJunitResults/
+                            scp -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -r genericx86-64_autotestJunitResults static.openswitch.net:/srv/static/archive/artifacts/$TYPE/$VERSION_STRING/.
+
+- publisher:
+    name: mail-on-fail
+    publishers:
+       - email:
+           recipients: '{email-by-space-when-fail}'
+
+- publisher:
+    name: mail-on-success
+    publishers:
+        - email-ext:
+             recipients: '{email-by-comma-when-success}'
+             content-type: html
+             subject: "$PROJECT_DEFAULT_SUBJECT"
+             body: "$PROJECT_DEFAULT_CONTENT"
+             failure: false
+             success: true

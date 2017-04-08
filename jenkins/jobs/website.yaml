@@ -1,0 +1,109 @@
+- job:
+    name: 'website-check'
+    node: openswitch
+
+    wrappers:
+        - build-timeout:
+            timeout: 65
+        - timestamps
+        - ansicolor
+
+    builders:
+        - revoke-sudo
+
+- job:
+    name: 'website-gate'
+    node: openswitch
+
+    wrappers:
+        - build-timeout:
+            timeout: 60
+        - timestamps
+        - ansicolor
+
+    builders:
+        - revoke-sudo
+
+- job:
+    name: 'website-stage-hourly'
+    node: openswitch
+
+    wrappers:
+        - build-timeout:
+            timeout: 65
+        - timestamps
+        - ansicolor
+
+    builders:
+        - revoke-sudo
+        - shell: |
+            #!/bin/bash -x
+            set -e
+
+            if [[ ! -e .git ]]; then
+              # Remove any content, otherwise the clone will fail
+              rm -Rf *
+              git clone https://git.openswitch.net/openswitch/ops-build .
+            else
+              git pull
+            fi
+            mkdir -p /mnt/jenkins/workspace/sstate-cache
+            export SSTATE_DIR=/mnt/jenkins/workspace/sstate-cache
+            if [ ! -f .platform ] ; then
+                make configure genericx86-64
+            fi
+            touch .devenv # hack to enable devenv
+            if [ ! -d src/ops-website ] ; then
+                make devenv_add ops-website
+                make ops-website-setup
+            fi
+            make ops-website-build
+            make ops-website-update
+            make ops-website-dist
+            rm -Rf egats
+            cp -R src/ops-website/dist egats
+
+    publishers:
+        - scp:
+            site: static.openswitch.net
+            files:
+              - target: ''
+                source: 'egats/**'
+                keep-hierarchy: true
+                copy-after-failure: false
+
+- job:
+    name: 'website-deploy-to-prod'
+    node: openswitch
+
+    parameters:
+        - choice:
+            name: action
+            choices:
+               - ============
+               - deploy_to_prod
+               - rollback_to_last
+
+    wrappers:
+        - build-timeout:
+            timeout: 60
+        - timestamps
+        - ansicolor
+        - ssh-agent-credentials:
+             users:
+                - 'ffc18805-a3da-4771-918a-eaaa6a1a0c70'
+
+    builders:
+        - revoke-sudo
+        - shell: |
+            #!/bin/bash -x
+            export ws=/srv/static
+            if [ "$action" = "deploy_to_prod" ]; then
+               echo "backup www/ to www-last and switch stage to prodution"
+               ssh static.openswitch.net "rm -rf $ws/www-last/* && mkdir -p $ws/www-last && rsync -rv $ws/www/. $ws/www-last && rsync -rv $ws/egats/. $ws/www"
+            elif [ "$action" = "rollback_to_last" ]; then
+               echo "rolling back www-last to www"
+               ssh static.openswitch.net "rsync -rv $ws/www-last/. $ws/www"
+            fi
+
+
